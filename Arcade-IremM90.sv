@@ -170,8 +170,12 @@ module emu
     // 1 - D-/TX
     // 2..6 - USR2..USR6
     // Set USER_OUT to 1 to read from USER_IN.
-    input   [6:0] USER_IN,
-    output  [6:0] USER_OUT,
+    // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_OSD + per-pin push-pull mask, USER_IO widened to 8 bits
+    output        USER_OSD,
+    output  [7:0] USER_PP,
+    input   [7:0] USER_IN,
+    output  [7:0] USER_OUT,
+    // [MiSTer-DB9 END]
 
     input         OSD_STATUS
 );
@@ -179,7 +183,9 @@ module emu
 ///////// Default values for ports not used in this core /////////
 
 assign ADC_BUS  = 'Z;
-assign USER_OUT = '1;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_PP driven by wrapper; USER_OUT driven by joydb (USER_OUT_DRIVE) below
+assign USER_PP = USER_PP_DRIVE;
+// [MiSTer-DB9 END]
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign CLK_VIDEO = clk_sys;
@@ -238,14 +244,19 @@ localparam CONF_STR = {
     "P2O[65],Layer 2,On,Off;",
     "P2O[67],Solid Sprites,Off,On;",
     "-;",
+    // [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
+    "O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
+    "O[125],UserIO Players, 1 Player,2 Players;",
+    // [MiSTer-DB9-Pro END]
+    "-;",
     "T[0],Reset;",
     "DEFMRA,/_Arcade/m90_test.mra;",
-    "V,v",`BUILD_DATE 
+    "V,v",`BUILD_DATE
 };
 
 wire        forced_scandoubler;
 wire  [1:0] buttons;
-wire [128:0] status;
+wire [127:0] status;
 wire [10:0] ps2_key;
 
 wire ioctl_rom_wait;
@@ -266,7 +277,84 @@ wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_din = ioctl_m90_din | ioctl_hs_din;
 wire        ioctl_wait = ioctl_rom_wait;
 
-wire [15:0] joystick_p1, joystick_p2, joystick_p3, joystick_p4;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: rename USB joystick wires (P1/P2 get DB9 routing; P3/P4 stay USB)
+wire [15:0] joystick_p1_USB, joystick_p2_USB;
+wire [15:0] joystick_p3, joystick_p4;
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper
+wire         CLK_JOY = CLK_50M;                 // Assign clock between 40-50Mhz
+wire   [1:0] joy_type_raw    = status[127:126]; // 0=Off, 1=Saturn, 2=DB9MD, 3=DB15
+wire         joy_2p          = status[125];
+// SNAC cores: replace 1'b0 with the core's SNAC enable expression so SNAC
+// preempts the joydb wrapper on shared USER_IO pins. Default 1'b0 is no-op.
+wire         snac_active     = 1'b0;
+// MT32-pi cores on primary USER_IO: replace 1'b0 with the core's MT32-active
+// expression. Default 1'b0 (no MT32 on this core).
+wire         mt32_primary_active = 1'b0;
+wire   [1:0] joy_type        = snac_active ? 2'd0 : joy_type_raw;
+wire         joy_db9md_en    = (joy_type == 2'd2);
+wire         joy_db15_en     = (joy_type == 2'd3);
+wire         joy_any_en      = |joy_type;
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+wire         saturn_unlocked;                   // driven by hps_io UIO_DB9_KEY (0xFE)
+// [MiSTer-DB9-Pro END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper wires + instance
+wire   [7:0] USER_OUT_DRIVE;
+wire   [7:0] USER_PP_DRIVE;
+wire  [15:0] joydb_1, joydb_2;
+wire         joydb_1ena, joydb_2ena;
+wire  [15:0] joy_raw_payload;
+
+joydb joydb (
+  .clk             ( CLK_JOY         ),
+  .USER_IN         ( USER_IN         ),
+  .OSD_STATUS          ( OSD_STATUS          ),
+  .snac_active         ( snac_active         ),
+  .mt32_primary_active ( mt32_primary_active ),
+  .joy_type        ( joy_type        ),
+  .joy_2p          ( joy_2p          ),
+  .saturn_unlocked ( saturn_unlocked ),
+  .USER_OUT_DRIVE  ( USER_OUT_DRIVE  ),
+  .USER_PP_DRIVE   ( USER_PP_DRIVE   ),
+  .USER_OSD        ( USER_OSD        ),
+  .joydb_1         ( joydb_1         ),
+  .joydb_2         ( joydb_2         ),
+  .joydb_1ena      ( joydb_1ena      ),
+  .joydb_2ena      ( joydb_2ena      ),
+  .joy_raw         ( joy_raw_payload )
+);
+
+assign USER_OUT = USER_OUT_DRIVE;
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9-Pro BEGIN] - DB controllers muted while OSD is open; remap joydb bits to Irem M90 order
+// M90 consumer layout (per <core>.sv + rtl/m90.sv + MRA button names):
+//   p1_input[3:0] = directions U/D/L/R   <- joystick[3:0]
+//   p1_input[4]   = Fire  (Drop Bomb / B) <- joystick[4]
+//   p1_input[5]   = Fire2 (Detonate / A)  <- joystick[5]
+//   m_start1      = joystick_p1[10]
+//   m_coin1       = joystick_p1[11]
+//   m_pause       = joystick_combined[13]
+// 2-button core (MRA num_buttons=2). joydb_1 source bits:
+//   [3:0]=R/L/D/U [4]=A [5]=B [6]=C [10]=Start [11]=Mode/Select/R-trigger
+//   Fire    <- joydb_1[4]  (A)
+//   Fire2   <- joydb_1[5]  (B)
+//   Start   <- joydb_1[10] (Start)            -> output bit 10
+//   Coin    <- joydb_1[11]|(joydb_1[10]&joydb_1[5])  (Select, OR Start+B chord
+//              so a 3-button MD pad can still insert coins) -> output bit 11
+//   Pause   <- joydb_1[6]  (C, spare face button)        -> output bit 13
+// Output bits [9:6] and [12] left 0 (unused face buttons / P2-start-alt).
+wire [15:0] joystick_p1 = joydb_1ena ? (OSD_STATUS ? 16'b0 :
+       { 2'b0, joydb_1[6], 1'b0, joydb_1[11]|(joydb_1[10]&joydb_1[5]), joydb_1[10], 4'b0, joydb_1[5:0] })
+       : joystick_p1_USB;
+wire [15:0] joystick_p2 = joydb_2ena ? (OSD_STATUS ? 16'b0 :
+       { 2'b0, joydb_2[6], 1'b0, joydb_2[11]|(joydb_2[10]&joydb_2[5]), joydb_2[10], 4'b0, joydb_2[5:0] })
+       : joydb_1ena ? joystick_p1_USB : joystick_p2_USB;
+// [MiSTer-DB9-Pro END]
 
 wire [21:0] gamma_bus;
 wire        direct_video;
@@ -305,12 +393,20 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
     .ioctl_index(ioctl_index),
     .ioctl_wait(ioctl_wait),
 
-    .joystick_0(joystick_p1),
-    .joystick_1(joystick_p2),
+    .joystick_0(joystick_p1_USB),
+    .joystick_1(joystick_p2_USB),
     .joystick_2(joystick_p3),
     .joystick_3(joystick_p4),
 
-    .ps2_key(ps2_key)
+    // [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joy_raw
+    .joy_raw(OSD_STATUS ? joy_raw_payload : 16'b0),
+    // [MiSTer-DB9 END]
+
+    .ps2_key(ps2_key),
+
+    // [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+    .saturn_unlocked(saturn_unlocked)
+    // [MiSTer-DB9-Pro END]
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
