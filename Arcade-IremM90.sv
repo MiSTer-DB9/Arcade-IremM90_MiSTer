@@ -363,10 +363,10 @@ assign USER_OUT = USER_OUT_DRIVE;
 //   Pause   <- joydb_1[6]  (C, spare face button)        -> output bit 13
 // Output bits [9:6] and [12] left 0 (unused face buttons / P2-start-alt).
 wire [15:0] joystick_p1 = joydb_1ena ? (OSD_STATUS ? 16'b0 :
-       { 2'b0, joydb_1[6], 1'b0, joydb_1[11]|(joydb_1[10]&joydb_1[5]), joydb_1[10], 4'b0, joydb_1[5:0] })
+       joydb_1_mapped[13:0])
        : joystick_p1_USB;
 wire [15:0] joystick_p2 = joydb_2ena ? (OSD_STATUS ? 16'b0 :
-       { 2'b0, joydb_2[6], 1'b0, joydb_2[11]|(joydb_2[10]&joydb_2[5]), joydb_2[10], 4'b0, joydb_2[5:0] })
+       joydb_2_mapped[13:0])
        : joydb_1ena ? joystick_p1_USB : joystick_p2_USB;
 // [MiSTer-DB9-Pro END]
 
